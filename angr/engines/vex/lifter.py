@@ -144,7 +144,7 @@ class VEXLifter(SimEngineBase):
             num_inst = 1
         if opt_level is None:
             if state and o.OPTIMIZE_IR in state.options:
-                opt_level = 1
+                opt_level = 0  #TODO: Yeah, fix this
             else:
                 opt_level = self._default_opt_level
         if cross_insn_opt is None:
