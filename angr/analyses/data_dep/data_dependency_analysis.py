@@ -340,7 +340,6 @@ class DataDependencyGraphAnalysis(Analysis):
         if act.action == SimActionData.WRITE:
             write_node = self._parse_action()
 
-
             src_nodes = read_nodes.get(write_node.value, None)
             if src_nodes:
                 # Write value came from a previous read value
