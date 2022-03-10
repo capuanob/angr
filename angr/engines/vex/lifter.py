@@ -23,6 +23,7 @@ class VEXLifter(SimEngineBase):
     """
     Implements the VEX lifter engine mixin.
     """
+
     def __init__(self, project,
                  use_cache=None,
                  cache_size=50000,
@@ -69,25 +70,24 @@ class VEXLifter(SimEngineBase):
         self._block_cache_hits = 0
         self._block_cache_misses = 0
 
-
     def lift_vex(self,
-             addr=None,
-             state=None,
-             clemory=None,
-             insn_bytes=None,
-             offset=None,
-             arch=None,
-             size=None,
-             num_inst=None,
-             traceflags=0,
-             thumb=False,
-             extra_stop_points=None,
-             opt_level=None,
-             strict_block_end=None,
-             skip_stmts=False,
-             collect_data_refs=False,
-             cross_insn_opt=None,
-             load_from_ro_regions=False):
+                 addr=None,
+                 state=None,
+                 clemory=None,
+                 insn_bytes=None,
+                 offset=None,
+                 arch=None,
+                 size=None,
+                 num_inst=None,
+                 traceflags=0,
+                 thumb=False,
+                 extra_stop_points=None,
+                 opt_level=None,
+                 strict_block_end=None,
+                 skip_stmts=False,
+                 collect_data_refs=False,
+                 cross_insn_opt=None,
+                 load_from_ro_regions=False):
 
         """
         Lift an IRSB.
@@ -144,7 +144,7 @@ class VEXLifter(SimEngineBase):
             num_inst = 1
         if opt_level is None:
             if state and o.OPTIMIZE_IR in state.options:
-                opt_level = 0  #TODO: Yeah, fix this
+                opt_level = 0  # TODO: Yeah, fix this
             else:
                 opt_level = self._default_opt_level
         if cross_insn_opt is None:
@@ -289,7 +289,7 @@ class VEXLifter(SimEngineBase):
         # skip loading from the clemory if we're using the ultra page
         # TODO: is this a good change? it neuters lookback optimizations
         # we can try concrete loading the full page but that has drawbacks too...
-        #if state is not None and issubclass(getattr(state.memory, 'PAGE_TYPE', object), UltraPage):
+        # if state is not None and issubclass(getattr(state.memory, 'PAGE_TYPE', object), UltraPage):
         #    smc = True
 
         # when smc is not enabled or when state is not provided, we *always* attempt to load concrete data first
@@ -378,10 +378,10 @@ class VEXLifter(SimEngineBase):
         s = {
             '_use_cache': self._use_cache,
             '_default_opt_level': self._default_opt_level,
-             '_support_selfmodifying_code': self._support_selfmodifying_code,
-             '_single_step': self._single_step,
-             '_cache_size': self._cache_size,
-             'default_strict_block_end': self.default_strict_block_end
+            '_support_selfmodifying_code': self._support_selfmodifying_code,
+            '_single_step': self._single_step,
+            '_cache_size': self._cache_size,
+            'default_strict_block_end': self.default_strict_block_end
         }
 
         return (s, ostate)
