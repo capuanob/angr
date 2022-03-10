@@ -197,6 +197,10 @@ class Clinic(Analysis):
         self._simplify_function(ail_graph, remove_dead_memdefs=self._remove_dead_memdefs,
                                 stack_arg_offsets=stackarg_offsets, unify_variables=True)
 
+        self._update_progress(68., text="Simplifying blocks 3")
+        ail_graph = self._simplify_blocks(ail_graph, remove_dead_memdefs=self._remove_dead_memdefs,
+                                          stack_pointer_tracker=spt)
+
         # Make function arguments
         self._update_progress(70., text="Making argument list")
         arg_list = self._make_argument_list()
@@ -237,7 +241,7 @@ class Clinic(Analysis):
                 new_stmts = copy.copy(block.statements)
                 new_block.statements = new_stmts
                 new_edge += (new_block,)
-            graph_copy.add_edge(*new_edge)
+            graph_copy.add_edge(*new_edge)  # pylint: disable=no-value-for-parameter
         return graph_copy
 
     @timethis
@@ -392,6 +396,7 @@ class Clinic(Analysis):
 
         simp = self.project.analyses.AILBlockSimplifier(
             ail_block,
+            self.function.addr,
             remove_dead_memdefs=remove_dead_memdefs,
             stack_pointer_tracker=stack_pointer_tracker,
             peephole_optimizations=self.peephole_optimizations,
@@ -517,6 +522,7 @@ class Clinic(Analysis):
                 if csm.result_block != block:
                     ail_block = csm.result_block
                     simp = self.project.analyses.AILBlockSimplifier(ail_block,
+                                                                    self.function.addr,
                                                                     stack_pointer_tracker=stack_pointer_tracker,
                                                                     peephole_optimizations=self.peephole_optimizations,
                                                                     stack_arg_offsets=csm.stack_arg_offsets,
@@ -759,15 +765,20 @@ class Clinic(Analysis):
             if len(variables) == 0:
                 # if it's a constant addr, maybe it's referencing an extern location
                 if isinstance(expr.addr, ailment.Expr.Const):
-                    symbol = self.project.loader.find_symbol(expr.addr.value)
-                    if symbol is not None:
-                        # Create a new global variable if there isn't one already
-                        global_vars = global_variables.get_global_variables(symbol.rebased_addr)
-                        if global_vars:
-                            global_var = next(iter(global_vars))
-                        else:
-                            global_var = SimMemoryVariable(symbol.rebased_addr, symbol.size, name=symbol.name)
-                            global_variables.add_variable('global', global_var.addr, global_var)
+                    # is there a variable for it?
+                    global_vars = global_variables.get_global_variables(expr.addr.value)
+                    if not global_vars:
+                        # detect if there is a related symbol
+                        symbol = self.project.loader.find_symbol(expr.addr.value)
+                        if symbol is not None:
+                            # Create a new global variable if there isn't one already
+                            global_vars = global_variables.get_global_variables(symbol.rebased_addr)
+                            if not global_vars:
+                                global_var = SimMemoryVariable(symbol.rebased_addr, symbol.size, name=symbol.name)
+                                global_variables.add_variable('global', global_var.addr, global_var)
+                                global_vars = {global_var}
+                    if global_vars:
+                        global_var = next(iter(global_vars))
                         expr.variable = global_var
                         expr.variable_offset = 0
                 else:
