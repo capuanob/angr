@@ -296,6 +296,10 @@ class DataDependencyGraphAnalysis(Analysis):
             # This is a value that isn't inherited from a previous statement
             val_node = self._get_or_create_graph_node(DepNodeTypes.Constant, act, read_node.value_tuple(), True)
             self._graph.add_edge(val_node, read_node)
+        elif ancestor_node is not None:
+            # Ancestor exists for this read, so no need to keep it around
+            self._graph.remove_node(read_node)
+            read_node = ancestor_node
 
         read_nodes.setdefault(read_node.value, [])
         read_nodes[read_node.value].append(read_node)
@@ -368,7 +372,7 @@ class DataDependencyGraphAnalysis(Analysis):
             return act_loc
         else:
             read_node = self._parse_read_statement(read_nodes=read_nodes)
-            self._set_active_node(read_node)
+            # self._set_active_node(read_node)
 
             # Sometimes an R is the last action in a statement
             return self._parse_statement(read_nodes) \
@@ -396,7 +400,7 @@ class DataDependencyGraphAnalysis(Analysis):
             ret_val = act_loc
         else:
             mem_node = self._parse_read_statement(read_nodes)
-            self._set_active_node(mem_node)
+            # self._set_active_node(mem_node)
             # Sometimes an R is the last action in a statement
             ret_val = None if self._peek() and act.stmt_idx == self._peek().stmt_idx else act_loc
 
