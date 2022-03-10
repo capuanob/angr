@@ -1,21 +1,25 @@
-import os
-import sys
+import binascii
 import copy
 import ctypes
-import cffi # lmao
-import threading
 import itertools
 import logging
-import pyvex
-import claripy
+import os
+import sys
+import threading
 import time
-import binascii
-import archinfo
 
-from ..sim_options import UNICORN_HANDLE_TRANSMIT_SYSCALL
-from ..errors import SimValueError, SimUnicornUnsupport, SimSegfaultError, SimMemoryError, SimUnicornError
-from .plugin import SimStatePlugin
+import archinfo
+import cffi  # lmao
+import claripy
+import pyvex
+from angr.engines.vex.claripy import ccall
+from angr.sim_state import SimState
+
+from .. import sim_options as options
+from ..errors import (SimMemoryError, SimSegfaultError, SimUnicornError,
+                      SimUnicornUnsupport, SimValueError)
 from ..misc.testing import is_testing
+from .plugin import SimStatePlugin
 
 l = logging.getLogger(name=__name__)
 ffi = cffi.FFI()
@@ -26,8 +30,10 @@ except ImportError:
     l.warning("Unicorn is not installed. Support disabled.")
     unicorn = None
 
-class MEM_PATCH(ctypes.Structure): # mem_update_t
-    pass
+class MEM_PATCH(ctypes.Structure):
+    """
+    struct mem_update_t
+    """
 
 MEM_PATCH._fields_ = [
         ('address', ctypes.c_uint64),
@@ -35,21 +41,31 @@ MEM_PATCH._fields_ = [
         ('next', ctypes.POINTER(MEM_PATCH))
     ]
 
-class TRANSMIT_RECORD(ctypes.Structure): # transmit_record_t
-    pass
+class TRANSMIT_RECORD(ctypes.Structure):
+    """
+    struct transmit_record_t
+    """
 
-TRANSMIT_RECORD._fields_ = [
+    _fields_ = [
         ('data', ctypes.c_void_p),
         ('count', ctypes.c_uint32)
     ]
 
-class TaintEntityEnum: # taint_entity_enum_t
+class TaintEntityEnum:
+    """
+    taint_entity_enum_t
+    """
+
     TAINT_ENTITY_REG = 0
     TAINT_ENTITY_TMP = 1
     TAINT_ENTITY_MEM = 2
     TAINT_ENTITY_NONE = 3
 
-class MemoryValue(ctypes.Structure): # memory_value_t
+class MemoryValue(ctypes.Structure):
+    """
+    struct memory_value_t
+    """
+
     _MAX_MEM_ACCESS_SIZE = 8
 
     _fields_ = [
@@ -59,7 +75,11 @@ class MemoryValue(ctypes.Structure): # memory_value_t
         ('is_value_symbolic', ctypes.c_bool)
     ]
 
-class RegisterValue(ctypes.Structure): # register_value_t
+class RegisterValue(ctypes.Structure):
+    """
+    struct register_value_t
+    """
+
     _MAX_REGISTER_BYTE_SIZE = 32
 
     _fields_ = [
@@ -67,7 +87,11 @@ class RegisterValue(ctypes.Structure): # register_value_t
         ('value', ctypes.c_uint8 * _MAX_REGISTER_BYTE_SIZE),
         ('size', ctypes.c_int64)
     ]
-class InstrDetails(ctypes.Structure): # sym_instr_details_t
+class InstrDetails(ctypes.Structure):
+    """
+    struct sym_instr_details_t
+    """
+
     _fields_ = [
         ('instr_addr', ctypes.c_uint64),
         ('has_memory_dep', ctypes.c_bool),
@@ -75,7 +99,11 @@ class InstrDetails(ctypes.Structure): # sym_instr_details_t
         ('memory_values_count', ctypes.c_uint64),
     ]
 
-class BlockDetails(ctypes.Structure): # sym_block_details_ret_t
+class BlockDetails(ctypes.Structure):
+    """
+    struct sym_block_details_ret_t
+    """
+
     _fields_ = [
         ('block_addr', ctypes.c_uint64),
         ('block_size', ctypes.c_uint64),
@@ -85,7 +113,11 @@ class BlockDetails(ctypes.Structure): # sym_block_details_ret_t
         ('register_values_count', ctypes.c_uint64),
     ]
 
-class STOP:  # stop_t
+class STOP:
+    """
+    enum stop_t
+    """
+
     STOP_NORMAL         = 0
     STOP_STOPPOINT      = 1
     STOP_ERROR          = 2
@@ -136,7 +168,8 @@ class STOP:  # stop_t
     stop_message[STOP_SYMBOLIC_CONDITION]    = "Symbolic condition for ITE"
     stop_message[STOP_SYMBOLIC_PC]           = "Instruction pointer became symbolic"
     stop_message[STOP_SYMBOLIC_READ_ADDR]    = "Attempted to read from symbolic address"
-    stop_message[STOP_SYMBOLIC_READ_SYMBOLIC_TRACKING_DISABLED]= "Attempted to read symbolic data from memory but symbolic tracking is disabled"
+    stop_message[STOP_SYMBOLIC_READ_SYMBOLIC_TRACKING_DISABLED]= ("Attempted to read symbolic data from memory but "
+                                                                  "symbolic tracking is disabled")
     stop_message[STOP_SYMBOLIC_WRITE_ADDR]   = "Attempted to write to symbolic address"
     stop_message[STOP_SYMBOLIC_BLOCK_EXIT_CONDITION] = "Guard condition of block's exit statement is symbolic"
     stop_message[STOP_SYMBOLIC_BLOCK_EXIT_TARGET] = "Target of default exit of block is symbolic"
@@ -152,7 +185,9 @@ class STOP:  # stop_t
     stop_message[STOP_UNKNOWN_MEMORY_WRITE_SIZE] = "Cannot determine size of memory write; likely because unicorn didn't"
     stop_message[STOP_SYMBOLIC_MEM_DEP_NOT_LIVE] = "A symbolic memory dependency on stack is no longer in scope"
     stop_message[STOP_SYSCALL_ARM]   = "ARM syscalls are currently not supported by SimEngineUnicorn"
-    stop_message[STOP_SYMBOLIC_MEM_DEP_NOT_LIVE_CURR_BLOCK] = "An instruction in current block overwrites a symbolic value needed for re-executing some instruction in same block"
+    stop_message[STOP_SYMBOLIC_MEM_DEP_NOT_LIVE_CURR_BLOCK] = ("An instruction in current block overwrites a symbolic "
+                                                               "value needed for re-executing some instruction in same "
+                                                               "block")
     stop_message[STOP_X86_CPUID] = "Block executes cpuid which should be handled in VEX engine"
 
     symbolic_stop_reasons = [STOP_SYMBOLIC_CONDITION, STOP_SYMBOLIC_PC, STOP_SYMBOLIC_READ_ADDR,
@@ -179,29 +214,42 @@ class STOP:  # stop_t
         return "Unknown stop reason"
 
 class StopDetails(ctypes.Structure):
+    """
+    struct stop_details_t
+    """
+
     _fields_ = [
         ('stop_reason', ctypes.c_int),
         ('block_addr', ctypes.c_uint64),
         ('block_size', ctypes.c_uint64),
     ]
 
+class SimOSEnum:
+    """
+    enum simos_t
+    """
+
+    SIMOS_CGC   = 0
+    SIMOS_LINUX = 1
+    SIMOS_OTHER = 2
+
 #
 # Memory mapping errors - only used internally
 #
 
-class MemoryMappingError(Exception):
+class MemoryMappingError(Exception):  # pylint: disable=missing-class-docstring
     pass
 
-class AccessingZeroPageError(MemoryMappingError):
+class AccessingZeroPageError(MemoryMappingError):  # pylint: disable=missing-class-docstring
     pass
 
-class FetchingZeroPageError(MemoryMappingError):
+class FetchingZeroPageError(MemoryMappingError):  # pylint: disable=missing-class-docstring
     pass
 
-class SegfaultError(MemoryMappingError):
+class SegfaultError(MemoryMappingError):  # pylint: disable=missing-class-docstring
     pass
 
-class MixedPermissonsError(MemoryMappingError):
+class MixedPermissonsError(MemoryMappingError):  # pylint: disable=missing-class-docstring
     pass
 
 #
@@ -209,6 +257,7 @@ class MixedPermissonsError(MemoryMappingError):
 #
 
 class AggressiveConcretizationAnnotation(claripy.SimplificationAvoidanceAnnotation):
+    # pylint: disable=missing-class-docstring
     def __init__(self, addr):
         claripy.SimplificationAvoidanceAnnotation.__init__(self)
         self.unicorn_start_addr = addr
@@ -220,7 +269,7 @@ class AggressiveConcretizationAnnotation(claripy.SimplificationAvoidanceAnnotati
 _unicounter = itertools.count()
 
 class Uniwrapper(unicorn.Uc if unicorn is not None else object):
-    # pylint: disable=non-parent-init-called
+    # pylint: disable=non-parent-init-called,missing-class-docstring
     def __init__(self, arch, cache_key, thumb=False):
         l.debug("Creating unicorn state!")
         self.arch = arch
@@ -286,6 +335,10 @@ _unicorn_tls = threading.local()
 _unicorn_tls.uc = None
 
 class _VexCacheInfo(ctypes.Structure):
+    """
+    VexCacheInfo struct from vex
+    """
+
     _fields_ = [
         ("num_levels", ctypes.c_uint),
         ("num_caches", ctypes.c_uint),
@@ -294,6 +347,10 @@ class _VexCacheInfo(ctypes.Structure):
     ]
 
 class _VexArchInfo(ctypes.Structure):
+    """
+    VexArchInfo struct from vex
+    """
+
     _fields_ = [
         ("hwcaps", ctypes.c_uint),
         ("endness", ctypes.c_int),
@@ -351,7 +408,7 @@ def _load_native():
             getattr(handle, func).argtypes = argtypes
 
         #_setup_prototype_explicit(h, 'logSetLogLevel', None, ctypes.c_uint64)
-        _setup_prototype(h, 'alloc', state_t, uc_engine_t, ctypes.c_uint64)
+        _setup_prototype(h, 'alloc', state_t, uc_engine_t, ctypes.c_uint64, ctypes.c_uint64)
         _setup_prototype(h, 'dealloc', None, state_t)
         _setup_prototype(h, 'hook', None, state_t)
         _setup_prototype(h, 'unhook', None, state_t)
@@ -374,20 +431,22 @@ def _load_native():
         _setup_prototype(h, 'symbolic_register_data', None, state_t, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64))
         _setup_prototype(h, 'get_symbolic_registers', ctypes.c_uint64, state_t, ctypes.POINTER(ctypes.c_uint64))
         _setup_prototype(h, 'is_interrupt_handled', ctypes.c_bool, state_t)
-        _setup_prototype(h, 'set_transmit_sysno', None, state_t, ctypes.c_uint32, ctypes.c_uint64)
+        _setup_prototype(h, 'set_cgc_syscall_details', None, state_t, ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint64)
         _setup_prototype(h, 'process_transmit', ctypes.POINTER(TRANSMIT_RECORD), state_t, ctypes.c_uint32)
         _setup_prototype(h, 'set_tracking', None, state_t, ctypes.c_bool, ctypes.c_bool)
         _setup_prototype(h, 'executed_pages', ctypes.c_uint64, state_t)
         _setup_prototype(h, 'in_cache', ctypes.c_bool, state_t, ctypes.c_uint64)
         _setup_prototype(h, 'set_map_callback', None, state_t, unicorn.unicorn.UC_HOOK_MEM_INVALID_CB)
-        _setup_prototype(h, 'set_vex_to_unicorn_reg_mappings', None, state_t, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
+        _setup_prototype(h, 'set_vex_to_unicorn_reg_mappings', None, state_t, ctypes.POINTER(ctypes.c_uint64),
+                         ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
         _setup_prototype(h, 'set_artificial_registers', None, state_t, ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
         _setup_prototype(h, 'get_count_of_blocks_with_symbolic_instrs', ctypes.c_uint64, state_t)
         _setup_prototype(h, 'get_details_of_blocks_with_symbolic_instrs', None, state_t, ctypes.POINTER(BlockDetails))
         _setup_prototype(h, 'get_stop_details', StopDetails, state_t)
         _setup_prototype(h, 'set_register_blacklist', None, state_t, ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
-        _setup_prototype(h, 'set_cpu_flags_details', None, state_t, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
-        _setup_prototype(h, 'set_unicorn_flags_register_id', None, state_t, ctypes.c_int64)
+        _setup_prototype(h, 'set_cpu_flags_details', None, state_t, ctypes.POINTER(ctypes.c_uint64),
+                         ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64)
+        _setup_prototype(h, 'set_fd_bytes', state_t, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64)
 
         l.info('native plugin is enabled')
 
@@ -507,9 +566,15 @@ class Unicorn(SimStatePlugin):
         self._concretized_asts = set() if concretized_asts is None else concretized_asts
 
         # the address to use for concrete transmits
-        self.transmit_addr = None
+        self.cgc_transmit_addr = None
+
+        # the address for CGC receive
+        self.cgc_receive_addr = None
 
         self.time = None
+
+        # Concrete bytes of open fds
+        self.fd_bytes = {}
 
         self._bullshit_cb = ctypes.cast(unicorn.unicorn.UC_HOOK_MEM_INVALID_CB(self._hook_mem_unmapped), unicorn.unicorn.UC_HOOK_MEM_INVALID_CB)
         self._skip_next_callback = False
@@ -538,7 +603,8 @@ class Unicorn(SimStatePlugin):
         u.countdown_symbolic_stop = self.countdown_symbolic_stop
         u.countdown_unsupported_stop = self.countdown_unsupported_stop
         u.countdown_stop_point = self.countdown_stop_point
-        u.transmit_addr = self.transmit_addr
+        u.cgc_receive_addr = self.cgc_receive_addr
+        u.cgc_transmit_addr = self.cgc_transmit_addr
         u._uncache_regions = list(self._uncache_regions)
         u.gdt = self.gdt
         return u
@@ -938,8 +1004,6 @@ class Unicorn(SimStatePlugin):
             self._mapped += 1
             _UC_NATIVE.activate_page(self._uc_state, addr, int(ffi.cast('uint64_t', ffi.from_buffer(bitmap))), int(ffi.cast('unsigned long', ffi.from_buffer(data))))
 
-        return
-
 
     def _get_details_of_blocks_with_symbolic_instrs(self):
         def _get_register_values(register_values):
@@ -956,16 +1020,8 @@ class Unicorn(SimStatePlugin):
 
         def _get_memory_values(memory_values):
             for memory_value in memory_values:
-                mem_address = memory_value.address
-                mem_val_size = memory_value.size
-                # Convert the memory value in bytes to number of appropriate size and endianness
-                mem_val = memory_value.value[:mem_val_size]
-                if self.state.arch.memory_endness == archinfo.Endness.LE:
-                    mem_val = int.from_bytes(mem_val, "little")
-                else:
-                    mem_val = int.from_bytes(mem_val, "big")
-
-                yield {"address": mem_address, "value": mem_val, "size": mem_val_size}
+                yield {"address": memory_value.address, "value": bytes(memory_value.value[:memory_value.size]),
+                       "size": memory_value.size, "symbolic": memory_value.is_value_symbolic}
 
         def _get_instr_details(symbolic_instrs):
             for instr in symbolic_instrs:
@@ -1019,8 +1075,16 @@ class Unicorn(SimStatePlugin):
             # reset the state and re-raise
             self.uc.reset()
             raise
+
+        if self.state.os_name == "CGC":
+            simos_val = SimOSEnum.SIMOS_CGC
+        elif self.state.os_name == "Linux":
+            simos_val = SimOSEnum.SIMOS_LINUX
+        else:
+            simos_val = SimOSEnum.SIMOS_OTHER
+
         # tricky: using unicorn handle from unicorn.Uc object
-        self._uc_state = _UC_NATIVE.alloc(self.uc._uch, self.cache_key)
+        self._uc_state = _UC_NATIVE.alloc(self.uc._uch, self.cache_key, simos_val)
 
         if options.UNICORN_SYM_REGS_SUPPORT in self.state.options and \
                 options.UNICORN_AGGRESSIVE_CONCRETIZATION not in self.state.options:
@@ -1040,12 +1104,22 @@ class Unicorn(SimStatePlugin):
             else:
                 _UC_NATIVE.symbolic_register_data(self._uc_state, 0, None)
 
-        # set (cgc, for now) transmit syscall handler
-        if UNICORN_HANDLE_TRANSMIT_SYSCALL in self.state.options and self.state.has_plugin('cgc'):
-            if self.transmit_addr is None:
-                l.error("You haven't set the address for concrete transmits!!!!!!!!!!!")
-                self.transmit_addr = 0
-            _UC_NATIVE.set_transmit_sysno(self._uc_state, 2, self.transmit_addr)
+        # set (cgc, for now) transmit and receive syscall handler
+        if self.state.has_plugin('cgc'):
+            if options.UNICORN_HANDLE_CGC_TRANSMIT_SYSCALL in self.state.options:
+                if self.cgc_transmit_addr is None:
+                    l.error("You haven't set the address for concrete transmits!!!!!!!!!!!")
+                    self.cgc_transmit_addr = 0
+
+            if options.UNICORN_HANDLE_CGC_RECEIVE_SYSCALL in self.state.options:
+                if self.cgc_receive_addr is None:
+                    l.error("You haven't set the address for receive syscall!!!!!!!!!!!!!!")
+                    self.cgc_receive_addr = 0
+                else:
+                    # Set stdin bytes in native interface
+                    self.fd_bytes[0] = bytearray(self.state.posix.fd.get(0).concretize()[0])
+
+            _UC_NATIVE.set_cgc_syscall_details(self._uc_state, 2, self.cgc_transmit_addr, 3, self.cgc_receive_addr)
 
         # set memory map callback so we can call it explicitly
         _UC_NATIVE.set_map_callback(self._uc_state, self._bullshit_cb)
@@ -1053,6 +1127,12 @@ class Unicorn(SimStatePlugin):
         # activate gdt page, which was written/mapped during set_regs
         if self.gdt is not None:
             _UC_NATIVE.activate_page(self._uc_state, self.gdt.addr, bytes(0x1000), None)
+
+        # Pass all concrete fd bytes to native interface so that it can handle relevant syscalls
+        for fd_num, fd_data in self.fd_bytes.items():
+            fd_bytes_p = int(ffi.cast('uint64_t', ffi.from_buffer(memoryview(fd_data))))
+            read_pos = self.state.solver.eval(self.state.posix.fd.get(fd_num).read_pos)
+            _UC_NATIVE.set_fd_bytes(self._uc_state, fd_num, fd_bytes_p, len(fd_data), read_pos)
 
         # Initialize list of artificial VEX registers
         artificial_regs_list = self.state.arch.artificial_registers_offsets
@@ -1062,27 +1142,33 @@ class Unicorn(SimStatePlugin):
         # Initialize VEX register offset to unicorn register ID mappings and VEX register offset to name map
         vex_reg_offsets = []
         unicorn_reg_ids = []
-        for vex_reg_offset, unicorn_reg_id in self.state.arch.vex_to_unicorn_map.items():
+        reg_sizes = []
+        for vex_reg_offset, (unicorn_reg_id, reg_size) in self.state.arch.vex_to_unicorn_map.items():
             vex_reg_offsets.append(vex_reg_offset)
             unicorn_reg_ids.append(unicorn_reg_id)
+            reg_sizes.append(reg_size)
 
         vex_reg_offsets_array = (ctypes.c_uint64 * len(vex_reg_offsets))(*map(ctypes.c_uint64, vex_reg_offsets))
         unicorn_reg_ids_array = (ctypes.c_uint64 * len(unicorn_reg_ids))(*map(ctypes.c_uint64, unicorn_reg_ids))
-        _UC_NATIVE.set_vex_to_unicorn_reg_mappings(self._uc_state, vex_reg_offsets_array, unicorn_reg_ids_array, len(vex_reg_offsets))
+        reg_sizes_array = (ctypes.c_uint64 * len(reg_sizes))(*map(ctypes.c_uint64, reg_sizes))
+        _UC_NATIVE.set_vex_to_unicorn_reg_mappings(self._uc_state, vex_reg_offsets_array, unicorn_reg_ids_array,
+                                                   reg_sizes_array, len(vex_reg_offsets))
 
-        # Initial VEX to unicorn mappings for flag register
-        if self.state.arch.unicorn_flag_register:
-            _UC_NATIVE.set_unicorn_flags_register_id(self._uc_state, self.state.arch.unicorn_flag_register)
-            cpu_flag_vex_offsets = []
-            cpu_flag_bitmasks = []
-            for cpu_flag_reg_offset, cpu_flag_reg_bitmask in self.state.arch.cpu_flag_register_offsets_and_bitmasks_map.items():
-                cpu_flag_vex_offsets.append(cpu_flag_reg_offset)
-                cpu_flag_bitmasks.append(cpu_flag_reg_bitmask)
+        # VEX to unicorn mappings for VEX flag registers
+        if self.state.arch.cpu_flag_register_offsets_and_bitmasks_map:
+            flag_vex_offsets = []
+            flag_bitmasks = []
+            flag_uc_regs = []
+            for flag_vex_offset, (uc_reg, flag_bitmask) in self.state.arch.cpu_flag_register_offsets_and_bitmasks_map.items():
+                flag_vex_offsets.append(flag_vex_offset)
+                flag_bitmasks.append(flag_bitmask)
+                flag_uc_regs.append(uc_reg)
 
-            if len(cpu_flag_vex_offsets) > 0:
-                cpu_flag_vex_offsets_array = (ctypes.c_uint64 * len(cpu_flag_vex_offsets))(*map(ctypes.c_uint64, cpu_flag_vex_offsets))
-                cpu_flag_bitmasks_array = (ctypes.c_uint64 * len(cpu_flag_bitmasks))(*map(ctypes.c_uint64, cpu_flag_bitmasks))
-                _UC_NATIVE.set_cpu_flags_details(self._uc_state, cpu_flag_vex_offsets_array, cpu_flag_bitmasks_array,len(cpu_flag_vex_offsets))
+            flag_vex_offsets_array = (ctypes.c_uint64 * len(flag_vex_offsets))(*map(ctypes.c_uint64, flag_vex_offsets))
+            flag_bitmasks_array = (ctypes.c_uint64 * len(flag_bitmasks))(*map(ctypes.c_uint64, flag_bitmasks))
+            flag_uc_regs_array = (ctypes.c_uint64 * len(flag_uc_regs))(*map(ctypes.c_uint64, flag_uc_regs))
+            _UC_NATIVE.set_cpu_flags_details(self._uc_state, flag_vex_offsets_array, flag_uc_regs_array,
+                                             flag_bitmasks_array, len(flag_vex_offsets))
         elif self.state.arch.name.startswith("ARM"):
             l.warning("Flag registers for %s not set in native unicorn interface.", self.state.arch.name)
 
@@ -1557,9 +1643,4 @@ class Unicorn(SimStatePlugin):
         #l.debug('passed quick check')
         return True
 
-
-from angr.engines.vex.claripy import ccall
-from .. import sim_options as options
-
-from angr.sim_state import SimState
 SimState.register_default('unicorn', Unicorn)
